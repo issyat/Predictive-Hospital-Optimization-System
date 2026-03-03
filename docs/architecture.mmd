@@ -1,0 +1,51 @@
+graph TD
+    subgraph Data Sources
+        EHR[EHR / Hospital DB] --> |FHIR/HL7| Ingestion[Ingestion Service]
+        Staff[Staff Scheduling System] --> Ingestion
+    end
+
+    subgraph Data & ETL Layer
+        Ingestion --> |Raw Data| RawDB[(Raw Data Storage)]
+        Ingestion --> ETL_Job[ETL & Anonymization]
+        ETL_Job --> |Cleaned Data| CleanedDB[(Cleaned Data Storage)]
+        ETL_Job --> FE[Feature Engineering Pipeline]
+    end
+
+    subgraph ML_Platform_Offline
+        FE --> |Features| FeatureStore[(Feature Store)]
+        FeatureStore --> |Training Data| Train_Forecast[Forecasting Model Training]
+        FeatureStore --> |Training Data| Train_Alert[Alert Model Training]
+        Train_Forecast --> |Validated Model| ModelRegistry[Model Registry]
+        Train_Alert --> |Validated Model| ModelRegistry
+        ModelRegistry --> |Model Version| Predict_Job[Batch Prediction Job]
+    end
+
+    subgraph Serving & Integration Online
+        FeatureStore --> |Real-time Features| Serve_API[Model Serving API]
+        ModelRegistry --> |Model Version| Serve_API
+        Serve_API --> |Predictions| PredictionDB[(Prediction DB)]
+        PredictionDB --> Serve_API
+        CleanedDB --> Optimizer[Optimization Engine]
+        PredictionDB --> Optimizer
+        CoreAPI[Core API Gateway] --> Serve_API
+        CoreAPI --> |Optimization Request| Optimizer
+        CoreAPI --> PredictionDB
+        CoreAPI --> AuditDB[(Audit Log DB)]
+    end
+
+    subgraph User Interface
+        CoreAPI --> Dashboard[Streamlit Dashboard]
+    end
+
+    subgraph Monitoring
+        AllServices --> Prom[Prometheus]
+        Prom --> Grafana[Grafana Dashboard]
+        AllServices --> ELK[ELK / EFK Stack]
+    end
+
+    classDef db fill:#f9f,stroke:#333,stroke-width:2px;
+    classDef model fill:#ff9,stroke:#333,stroke-width:2px;
+    classDef api fill:#9f9,stroke:#333,stroke-width:2px;
+    class RawDB,CleanedDB,FeatureStore,PredictionDB,ModelRegistry,AuditDB db;
+    class Train_Forecast,Train_Alert,Serve_API,Predict_Job model;
+    class Ingestion,ETL_Job,FE,Optimizer,CoreAPI,Dashboard api;
