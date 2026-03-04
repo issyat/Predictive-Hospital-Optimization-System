@@ -84,62 +84,89 @@ This project was designed to run natively on Databricks. Here is why each major 
 ## 📊 Architecture Diagram
 
 ```mermaid
-flowchart TD
-    subgraph ds["Data Sources"]
-        ehr["EHR / Hospital DB"] -->|FHIR/HL7| autoLoader["Databricks Auto Loader"]
-        staff["Staff Scheduling System"] --> autoLoader
+graph TD
+    subgraph Sources["Data Sources"]
+        EHR["EHR / Hospital DB"]
+        Staff["Staff Scheduling System"]
     end
 
-    subgraph medallion["Delta Lake: Medallion Architecture"]
-        autoLoader -->|Raw Data| bronze["Bronze Layer<br/>Raw Delta Tables"]
-        bronze --> etl["PySpark ETL Job<br/>Anonymization + Validation"]
-        etl -->|Cleaned Data| silver["Silver Layer<br/>Cleaned Delta Tables"]
-        silver --> fe["Feature Engineering<br/>PySpark Pipeline"]
-        fe -->|Feature Tables| gold["Gold Layer<br/>Databricks Feature Store"]
+    subgraph Medallion["Delta Lake - Medallion Architecture"]
+        AutoLoader["Databricks Auto Loader"]
+        Bronze[("Bronze Layer<br/>Raw Delta Tables")]
+        ETL["PySpark ETL Job<br/>Anonymization + Validation"]
+        Silver[("Silver Layer<br/>Cleaned Delta Tables")]
+        FE["Feature Engineering<br/>PySpark Pipeline"]
+        Gold[("Gold Layer<br/>Databricks Feature Store")]
     end
 
-    subgraph ml["ML Platform: Offline"]
-        gold -->|Training Data| trainForecast["Pipeline 1<br/>Prophet + LSTM Training"]
-        gold -->|Training Data| trainAlert["Pipeline 3<br/>XGBoost + SHAP Training"]
-        gold -->|Demand Data| optimizer["Pipeline 2<br/>PuLP Staffing Optimizer"]
-
-        trainForecast -->|Validated Model + Metrics| mlflowReg["MLflow Model Registry"]
-        trainAlert -->|Validated Model + Metrics| mlflowReg
-        mlflowReg -->|Promoted Model| modelServing["Databricks Model Serving<br/>REST Endpoints"]
-        mlflowReg -->|Scheduled| batchJob["Batch Prediction Jobs"]
+    subgraph MLPlatform["ML Platform - Offline"]
+        Train_Forecast["Pipeline 1<br/>Prophet + LSTM Training"]
+        Train_Alert["Pipeline 3<br/>XGBoost + SHAP Training"]
+        Optimizer["Pipeline 2<br/>PuLP Staffing Optimizer"]
+        MLflowReg["MLflow Model Registry"]
+        ModelServing["Databricks Model Serving<br/>REST Endpoints"]
+        BatchJob["Batch Prediction Jobs"]
     end
 
-    subgraph serving["Serving Layer"]
-        gold -->|Real-time Features| modelServing
-        modelServing -->|Predictions| predDb["Prediction DB<br/>Delta Table"]
-        optimizer -->|Schedule| predDb
-
-        apiGateway["FastAPI Gateway<br/>FHIR R4 + Auth"] --> modelServing
-        apiGateway --> predDb
-        apiGateway --> auditDb["Audit Log<br/>Delta Table"]
+    subgraph Serving["Serving Layer"]
+        PredDB[("Prediction DB<br/>Delta Table")]
+        APIGateway["FastAPI Gateway<br/>FHIR R4 + Auth"]
+        AuditDB[("Audit Log<br/>Delta Table")]
     end
 
-    subgraph ui["User Interface"]
-        apiGateway --> dashboard["Streamlit Dashboard<br/>Doctor / Manager / Executive"]
+    subgraph UI["User Interface"]
+        Dashboard["Streamlit Dashboard<br/>Doctor / Manager / Executive"]
     end
 
-    subgraph obs["Observability"]
-        lhm["Lakehouse Monitoring"] -->|Drift Alerts| alerts["Databricks Alerts"]
-        mlflowReg -->|Model Metrics| grafana["Grafana Dashboard"]
-        apiGateway -->|Structured Logs| elk["ELK Stack"]
+    subgraph Observability["Observability"]
+        LHM["Lakehouse Monitoring"]
+        Alerts["Databricks Alerts"]
+        Grafana["Grafana Dashboard"]
+        ELK["ELK Stack"]
     end
 
-    classDef delta fill:#003366,color:#fff,stroke:#003366;
-    classDef mlflow fill:#0194E2,color:#fff,stroke:#0194E2;
-    classDef api fill:#2E7D32,color:#fff,stroke:#2E7D32;
-    classDef source fill:#FF6B35,color:#fff,stroke:#FF6B35;
-    classDef monitor fill:#6A1B9A,color:#fff,stroke:#6A1B9A;
+    EHR -->|"FHIR/HL7"| AutoLoader
+    Staff --> AutoLoader
+    AutoLoader -->|"Raw Data"| Bronze
+    Bronze --> ETL
+    ETL -->|"Cleaned Data"| Silver
+    Silver --> FE
+    FE -->|"Feature Tables"| Gold
 
-    class bronze,silver,gold,predDb,auditDb delta;
-    class trainForecast,trainAlert,mlflowReg,modelServing,batchJob mlflow;
-    class fe,etl,autoLoader,optimizer,apiGateway,dashboard api;
-    class ehr,staff source;
-    class lhm,alerts,grafana,elk monitor;
+    Gold -->|"Training Data"| Train_Forecast
+    Gold -->|"Training Data"| Train_Alert
+    Gold -->|"Demand Data"| Optimizer
+
+    Train_Forecast -->|"Validated Model + Metrics"| MLflowReg
+    Train_Alert -->|"Validated Model + Metrics"| MLflowReg
+    MLflowReg -->|"Promoted Model"| ModelServing
+    MLflowReg -->|"Scheduled"| BatchJob
+
+    Gold -->|"Real-time Features"| ModelServing
+    ModelServing -->|"Predictions"| PredDB
+    Optimizer -->|"Schedule"| PredDB
+
+    APIGateway --> ModelServing
+    APIGateway --> PredDB
+    APIGateway --> AuditDB
+
+    APIGateway --> Dashboard
+
+    LHM -->|"Drift Alerts"| Alerts
+    MLflowReg -->|"Model Metrics"| Grafana
+    APIGateway -->|"Structured Logs"| ELK
+
+    classDef delta fill:#003366,color:#fff,stroke:#003366
+    classDef mlflow fill:#0194E2,color:#fff,stroke:#0194E2
+    classDef api fill:#2E7D32,color:#fff,stroke:#2E7D32
+    classDef source fill:#FF6B35,color:#fff,stroke:#FF6B35
+    classDef monitor fill:#6A1B9A,color:#fff,stroke:#6A1B9A
+
+    class Bronze,Silver,Gold,PredDB,AuditDB delta
+    class Train_Forecast,Train_Alert,MLflowReg,ModelServing,BatchJob mlflow
+    class FE,ETL,AutoLoader,Optimizer,APIGateway,Dashboard api
+    class EHR,Staff source
+    class LHM,Alerts,Grafana,ELK monitor
 ```
 
 ---
@@ -330,53 +357,6 @@ hospital-optimization-system/
 | Deep Learning | LSTM (TensorFlow) | GPU cluster, `tensorflow-privacy` | < 2 (target) |
 | Final | Prophet + LSTM ensemble | Weighted average, MLflow pyfunc model | Best overall |
 
-#### Training on Databricks
-
-```python
-# train_prophet.py — runs as a Databricks Job
-import mlflow
-from databricks.feature_store import FeatureStoreClient
-
-fs = FeatureStoreClient()
-
-# Load features from Databricks Feature Store (point-in-time correct)
-training_df = fs.create_training_set(
-    df=labels_df,
-    feature_lookups=[
-        FeatureLookup(table_name="gold.admission_time_features",
-                      lookup_key="admission_date")
-    ],
-    label="admission_count"
-).load_df()
-
-with mlflow.start_run(run_name="prophet_forecasting"):
-    model = Prophet(yearly_seasonality=True, weekly_seasonality=True)
-    model.fit(training_pd)
-    mlflow.prophet.log_model(model, "prophet_model")
-    mlflow.log_metric("mae", evaluate_mae(model, test_df))
-```
-
-#### Hyperparameter Tuning (Hyperopt)
-
-```python
-# LSTM tuning — distributed across cluster workers
-from hyperopt import fmin, tpe, hp, SparkTrials
-
-search_space = {
-    "lstm_units_1": hp.choice("lstm_units_1", [32, 64, 128]),
-    "dropout":       hp.uniform("dropout", 0.1, 0.4),
-    "learning_rate": hp.loguniform("lr", -5, -2)
-}
-
-best = fmin(
-    fn=train_lstm_objective,
-    space=search_space,
-    algo=tpe.suggest,
-    max_evals=50,
-    trials=SparkTrials(parallelism=4)  # 4 parallel cluster workers
-)
-```
-
 ---
 
 ### Pipeline 2 — Staffing Optimization
@@ -398,29 +378,6 @@ Constraints:
   X[i,t] = 0 if not ICU-certified                  (skill constraint)
 ```
 
-#### Integration with Forecasting Output
-
-```python
-# Runs as a Databricks Job step, chained after Pipeline 1
-from databricks.sdk.runtime import dbutils
-
-# Read latest forecast from Delta prediction table
-forecast_df = spark.table("gold.admission_predictions") \
-    .filter("prediction_date = current_date()") \
-    .orderBy("prediction_hour")
-
-demand = convert_to_staff_demand(forecast_df)         # business rule: 1 nurse per N patients
-roster = spark.table("silver.staff_roster").toPandas()
-
-schedule = staffing_optimizer.solve(demand=demand, roster=roster)
-
-# Write schedule back to Delta for API serving
-spark.createDataFrame(schedule).write \
-    .mode("overwrite") \
-    .partitionBy("schedule_date") \
-    .saveAsTable("gold.staff_schedules")
-```
-
 ---
 
 ### Pipeline 3 — Complication Alerts
@@ -438,61 +395,6 @@ spark.createDataFrame(schedule).write \
 | **B (production target)** | ICD-coded events: sepsis (995.91), AKI (584.x) | Clinically precise | Requires ICD coding quality |
 | **C (stretch)** | ICU readmission within 30 days | Actionable, avoidable | Lower prevalence |
 
-#### Training on Databricks with Hyperopt
-
-```python
-import mlflow
-import xgboost as xgb
-from hyperopt import fmin, tpe, hp, SparkTrials
-
-with mlflow.start_run(run_name="xgboost_complication_alert"):
-
-    def objective(params):
-        model = xgb.XGBClassifier(
-            max_depth=int(params["max_depth"]),
-            learning_rate=params["learning_rate"],
-            scale_pos_weight=params["scale_pos_weight"],
-            n_estimators=300, use_label_encoder=False
-        )
-        model.fit(X_train, y_train)
-        precision = precision_score(y_val, model.predict(X_val))
-        mlflow.log_metric("val_precision", precision)
-        return -precision  # Hyperopt minimizes
-
-    best = fmin(fn=objective, space={
-        "max_depth":         hp.quniform("max_depth", 3, 10, 1),
-        "learning_rate":     hp.loguniform("lr", -4, -1),
-        "scale_pos_weight":  hp.uniform("spw", 1, 10)
-    }, algo=tpe.suggest, max_evals=100, trials=SparkTrials(parallelism=5))
-
-    # Log final model with SHAP explainer wrapper
-    mlflow.xgboost.log_model(final_model, "xgboost_alert_model",
-                              registered_model_name="complication_alert_v1")
-```
-
-#### SHAP Explainability at Inference Time
-
-Every prediction served by Databricks Model Serving includes a SHAP explanation:
-
-```python
-# Served as part of the MLflow pyfunc model
-class AlertModelWithSHAP(mlflow.pyfunc.PythonModel):
-
-    def predict(self, context, model_input):
-        risk_scores = self.xgb_model.predict_proba(model_input)[:, 1]
-        explainer   = shap.TreeExplainer(self.xgb_model)
-        shap_values = explainer.shap_values(model_input)
-
-        top_features = self._get_top_features(shap_values, model_input, n=3)
-
-        return pd.DataFrame({
-            "risk_score":   risk_scores,
-            "risk_level":   pd.cut(risk_scores, bins=[0,.4,.7,1],
-                                   labels=["LOW","MEDIUM","HIGH"]),
-            "explanation":  top_features   # JSON array of {feature, impact}
-        })
-```
-
 **Sample alert response:**
 ```json
 {
@@ -506,32 +408,6 @@ class AlertModelWithSHAP(mlflow.pyfunc.PythonModel):
   ],
   "fhir_resource": { "resourceType": "RiskAssessment", "..." : "..." }
 }
-```
-
-#### Bias Audit (runs automatically after each training job)
-
-```python
-# bias_audit.py — triggered by Databricks Workflow post-training step
-SUBGROUPS = {
-    "age_over_65":    df["age"] > 65,
-    "age_under_65":   df["age"] <= 65,
-    "male":           df["gender"] == "M",
-    "female":         df["gender"] == "F",
-}
-DISPARITY_THRESHOLD = 0.05
-
-results = {}
-for group_name, mask in SUBGROUPS.items():
-    results[group_name] = {
-        "precision": precision_score(y[mask], y_pred[mask]),
-        "recall":    recall_score(y[mask], y_pred[mask]),
-        "fpr":       false_positive_rate(y[mask], y_pred[mask])
-    }
-    mlflow.log_metrics({f"{group_name}_{k}": v for k,v in results[group_name].items()})
-
-# Flag if disparity detected
-if max_disparity(results, "precision") > DISPARITY_THRESHOLD:
-    dbutils.notebook.exit("BIAS_ALERT: Precision disparity exceeds threshold")
 ```
 
 ---
@@ -550,30 +426,6 @@ Development (notebook)
     → Archived: previous version retained for rollback
 ```
 
-### Promotion Workflow
-
-```python
-from mlflow.tracking import MlflowClient
-
-client = MlflowClient()
-
-# Automated promotion: only if all quality gates pass
-def promote_to_production(model_name, run_id):
-    run = client.get_run(run_id)
-    metrics = run.data.metrics
-
-    assert metrics["test_mae"]       < 2.0,  "MAE target missed"
-    assert metrics["test_precision"] > 0.85, "Precision target missed"
-    assert metrics["max_bias_disparity"] < 0.05, "Bias audit failed"
-
-    client.transition_model_version_stage(
-        name=model_name,
-        version=latest_version,
-        stage="Production",
-        archive_existing_versions=True
-    )
-```
-
 ### Registered Models
 
 | Model Name | Current Stage | KPI |
@@ -588,58 +440,6 @@ def promote_to_production(model_name, run_id):
 
 The Feature Store is the single source of truth for all model features — at training time and serving time.
 
-### Feature Registration
-
-```python
-from databricks.feature_store import FeatureStoreClient, FeatureTable
-
-fs = FeatureStoreClient()
-
-# Register the admission time features table
-fs.create_table(
-    name="gold.admission_time_features",
-    primary_keys=["admission_date"],
-    schema=features_df.schema,
-    description="Time-based admission features — updated daily by ETL job"
-)
-fs.write_table(name="gold.admission_time_features", df=features_df, mode="overwrite")
-```
-
-### Point-in-Time Correct Training Sets
-
-```python
-# Critical for clinical ML — prevents any future data leakage
-training_set = fs.create_training_set(
-    df=labels_with_timestamps,
-    feature_lookups=[
-        FeatureLookup(
-            table_name="gold.patient_vitals_features",
-            lookup_key="patient_id",
-            timestamp_lookup_key="event_time"   # Point-in-time join
-        ),
-        FeatureLookup(
-            table_name="gold.patient_lab_features",
-            lookup_key="patient_id",
-            timestamp_lookup_key="event_time"
-        )
-    ],
-    label="complication_flag"
-)
-```
-
-### Online Store Sync (Real-time Serving)
-
-For real-time inference via Databricks Model Serving, feature tables are synced to an **online store** (DynamoDB on AWS / Cosmos DB on Azure):
-
-```python
-# online_store_sync.py — triggered after each ETL job
-fs.publish_table(
-    name="gold.patient_vitals_features",
-    online_store=DynamoDBSpec(region="eu-west-1", table_name="patient_vitals_online"),
-    mode="merge"
-)
-```
-
 ---
 
 ## 🔒 Privacy & Compliance
@@ -653,23 +453,7 @@ Patient data is protected at two levels using the differential privacy framework
 | Training | DP-SGD (gradient perturbation) | `tensorflow-privacy` | LSTM model training |
 | Output | Laplace mechanism (output perturbation) | Custom implementation | Forecasted admission counts |
 
-**Epsilon calibration** is run as a scheduled **Databricks Job** (monthly):
-
-```python
-# epsilon_sweep.py — runs as a Databricks Workflow job
-EPSILON_VALUES = [0.1, 0.5, 1.0, 2.0, 5.0, 10.0]
-
-with mlflow.start_run(run_name="dp_epsilon_sweep"):
-    for epsilon in EPSILON_VALUES:
-        model = train_lstm_with_dp(epsilon=epsilon, delta=1/len(train_df))
-        metrics = evaluate(model, test_df)
-
-        mlflow.log_metrics({
-            f"epsilon_{epsilon}_mae":       metrics["mae"],
-            f"epsilon_{epsilon}_precision": metrics["precision"]
-        })
-        # This tradeoff curve is your GDPR compliance evidence
-```
+**Epsilon calibration** is run as a scheduled **Databricks Job** (monthly), testing values across `{0.1, 0.5, 1.0, 2.0, 5.0, 10.0}`. Each run logs MAE and precision metrics to MLflow, producing the privacy-utility tradeoff curve that serves as GDPR compliance evidence.
 
 **Selected epsilon:** The value achieving all KPI targets with minimum privacy cost. See [`docs/epsilon_report.md`](docs/epsilon_report.md).
 
@@ -781,17 +565,6 @@ MLflow logs and tracks the following metrics after every batch prediction run:
 | Metrics | Prometheus + Grafana | Request rate, latency p99, error rate per endpoint |
 | Logs | ELK Stack | Structured JSON prediction audit logs |
 | Traces | Databricks REST API | Model serving invocation latency |
-
-### Databricks Alerts
-
-```python
-# Retraining trigger — configured as a Databricks Alert on SQL query
-SELECT rolling_mae_7d
-FROM gold.model_monitoring_forecast
-WHERE window_date = current_date()
-HAVING rolling_mae_7d > 3.0
--- If this query returns rows, Databricks sends an alert and triggers retraining workflow
-```
 
 ---
 
