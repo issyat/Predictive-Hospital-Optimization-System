@@ -173,43 +173,197 @@ graph TD
 
 ## 🥉🥈🥇 Medallion Architecture: Bronze → Silver → Gold
 
-The entire data lifecycle follows Databricks' Medallion Architecture, implemented as Delta Lake tables in Unity Catalog.
+The entire data lifecycle follows Databricks' Medallion Architecture, implemented as Delta Lake tables in Unity Catalog. The source data is the **MIMIC-III Clinical Database**, ingested from CSV files uploaded to a Unity Catalog Volume — replacing the deprecated DBFS storage with the current Databricks standard.
 
-### Bronze Layer — Raw Ingestion
+---
 
-| Table | Source | Ingestion Method |
+### 🥉 Bronze Layer — Raw Ingestion
+
+Bronze is a faithful, unmodified digital copy of the source CSV files. No transformations are applied. Every value is stored as a raw string exactly as it came from the source. Bronze is append-only and serves as the permanent audit record of the original data.
+
+| Delta Table | Source CSV | Rows (Demo) |
 |---|---|---|
-| `bronze.admissions_raw` | EHR FHIR R4 Bundle | Auto Loader (JSON stream) |
-| `bronze.chartevents_raw` | MIMIC CHARTEVENTS | Auto Loader (CSV batch) |
-| `bronze.labevents_raw` | MIMIC LABEVENTS | Auto Loader (CSV batch) |
-| `bronze.staff_roster_raw` | HR Scheduling System | Auto Loader (CSV stream) |
+| `bronze.admissions` | `ADMISSIONS.csv` | ~129 |
+| `bronze.patients` | `PATIENTS.csv` | ~100 |
+| `bronze.chartevents` | `CHARTEVENTS.csv` | ~263,000+ |
+| `bronze.labevents` | `LABEVENTS.csv` | ~27,854 |
+| `bronze.icustays` | `ICUSTAYS.csv` | ~136 |
+| `bronze.diagnoses_icd` | `DIAGNOSES_ICD.csv` | ~1,825 |
+| `bronze.d_items` | `D_ITEMS.csv` | ~12,487 |
+| `bronze.d_labitems` | `D_LABITEMS.csv` | ~753 |
 
-All Bronze tables are **append-only**, retain full history, and have `_ingestion_timestamp` and `_source_file` metadata columns for audit lineage.
+All Bronze tables carry two metadata columns added at ingestion time:
+- `_ingestion_timestamp` — when the row was loaded into Databricks
+- `_source_file` — which CSV file the row came from
 
-### Silver Layer — Cleaned & Anonymized
+> **Key rule:** Bronze is never modified after ingestion. If source data needs to be reloaded, the ingestion job runs again and overwrites. Manual edits to Bronze tables are never permitted.
 
-Databricks Workflows orchestrate the Bronze → Silver ETL job, which applies:
-- **Pseudonymization** of patient identifiers (SHA-256 hash + salt stored in Databricks Secret Scope)
-- **Schema validation** via Delta constraints and Great Expectations on Databricks
-- **Outlier clipping** (heart rate: 20–300 bpm, BP: 40–250 mmHg)
-- **Missing value imputation** (forward-fill for vitals, median for labs)
-- **FHIR resource parsing** into structured Delta columns
+---
 
-### Gold Layer — Feature Store (Databricks Feature Store)
+### 🥈 Silver Layer — Cleaned & Anonymized
 
-The Gold layer is managed entirely by **Databricks Feature Store**, enabling:
-- **Point-in-time correct joins** — critical for clinical ML to prevent label leakage
-- **Shared feature reuse** across all three pipelines
-- **Automatic online/offline consistency** — same features at training and serving time
-- **Full lineage** back to source Silver tables
+Silver takes Bronze and applies nine systematic cleaning and validation techniques. The result is typed, anonymized, validated, and deduplicated data ready for feature engineering.
 
-| Feature Table | Key Features | Used By |
+#### 1. Data Type Casting
+
+Every Bronze column is stored as a raw string. Silver converts each column to its correct type:
+- Admission and chart timestamps → `timestamp`
+- Patient and admission identifiers → `integer`
+- Vital sign and lab measurements → `double`
+- Length of stay → `double` (days)
+
+#### 2. Pseudonymization
+
+All patient identifiers are replaced with SHA-256 hashes combined with a secret salt stored in Databricks Secret Scope. Real patient IDs never exist past the Bronze layer.
+- `SUBJECT_ID` → 64-character SHA-256 hash
+- `HADM_ID` → 64-character SHA-256 hash
+- `ICUSTAY_ID` → 64-character SHA-256 hash
+
+The salt is never stored in notebooks or code — it is fetched at runtime from `dbutils.secrets.get()`.
+
+#### 3. Age Calculation
+
+Patient age is derived by subtracting `DOB` from `ADMITTIME` in the Silver admissions table. MIMIC shifts dates for patients older than 89 as a privacy measure, producing calculated ages of 200–400 years. These are **capped at 89** following the standard MIMIC documentation approach.
+
+#### 4. Null Handling
+
+Specific columns that must not be null are enforced:
+- `DISCHTIME` in admissions — rows with null discharge time are dropped
+- `OUTTIME` in icustays — rows with null ICU discharge time are dropped
+- `CHARTTIME` in chartevents and labevents — rows with no timestamp are dropped
+- `HADM_ID` in labevents — rows with no admission linkage are dropped *(this is a documented MIMIC characteristic where outpatient labs have no admission ID)*
+
+#### 5. Data Validation
+
+Medically impossible values are removed using hard physiological limits:
+
+| Measurement | Valid Minimum | Valid Maximum |
 |---|---|---|
-| `gold.admission_time_features` | `admission_hour`, `dow`, `month`, `is_holiday`, `admissions_last_7d` | Pipeline 1 |
-| `gold.patient_vitals_features` | `hr_mean_24h`, `bp_mean_24h`, `spo2_mean_24h`, `temp_last` | Pipeline 3 |
-| `gold.patient_lab_features` | `creatinine_last`, `glucose_last`, `wbc_last`, `lactate_last` | Pipeline 3 |
-| `gold.icu_stay_features` | `los_icu_days`, `num_procedures`, `icu_readmission_flag` | Pipeline 3 |
-| `gold.staff_demand_features` | `forecasted_admissions`, `current_census`, `ward_capacity` | Pipeline 2 |
+| Heart Rate | 0 bpm | 300 bpm |
+| Systolic Blood Pressure | 0 mmHg | 300 mmHg |
+| SpO2 | 0% | 100% |
+| Temperature | 25°C | 45°C |
+| Respiratory Rate | 0 /min | 100 /min |
+| Creatinine | 0 mg/dL | 150 mg/dL |
+| Glucose | 0 mg/dL | 2000 mg/dL |
+| Lactate | 0 mmol/L | 30 mmol/L |
+
+#### 6. Outlier Detection
+
+Statistical outliers within the valid range are removed using the **IQR method**. For each item ID, Q1 and Q3 are calculated. Any value beyond 3×IQR above Q3 or below Q1 is removed. This is applied separately to `chartevents` and `labevents`.
+
+#### 7. Filtering Irrelevant Data
+
+`CHARTEVENTS` contains 700+ different measurement types. Only the 5 vital signs needed for the ML model are retained, identified by their MIMIC item IDs:
+
+| Vital Sign | CareVue ID | MetaVision ID |
+|---|---|---|
+| Heart Rate | 211 | 220045 |
+| Systolic BP | 51, 455 | 220050, 220179 |
+| SpO2 | 646 | 220277 |
+| Temperature (°C) | 676 | 223762 |
+| Respiratory Rate | 618 | 220210 |
+
+`LABEVENTS` is similarly filtered to 6 clinically relevant lab tests: creatinine (50912), glucose (50931), hemoglobin (51222), platelets (51265), WBC (51301), and lactate (50813).
+
+#### 8. Deduplication
+
+Duplicate rows — same patient, same measurement, same timestamp — are removed from `chartevents`, `labevents`, and `admissions` using `dropDuplicates()` on the combination of key columns.
+
+#### 9. Referential Integrity
+
+Orphaned records are removed by enforcing that every foreign key in one table exists in its parent table:
+- `chartevents.hadm_id` must exist in `admissions`
+- `labevents.hadm_id` must exist in `admissions`
+- `icustays.hadm_id` must exist in `admissions`
+- `admissions.subject_id` must exist in `patients`
+
+#### 10. Data Partitioning
+
+Large tables are physically partitioned by date for query performance:
+- `silver.chartevents` — partitioned by year and month
+- `silver.labevents` — partitioned by year and month
+- `silver.admissions` — partitioned by year
+
+---
+
+### 🥇 Gold Layer — Feature Engineering
+
+Gold takes the clean Silver tables and produces one flat feature table per ML pipeline. Each Gold table has one row per hospital admission where every column is a number the model can learn from. Raw measurements are summarized into statistical aggregations, normalized, and enriched with derived indicators.
+
+#### `gold.admission_features` — Pipeline 1 (Forecasting)
+
+Extracts time components from admission timestamps so the forecasting model can learn when admissions tend to happen.
+
+| Column | Description |
+|---|---|
+| `admission_hour` | Hour of day the patient was admitted (0–23) |
+| `admission_dow` | Day of week (1=Sunday, 7=Saturday) |
+| `admission_month` | Month of year (1–12) |
+| `admission_year` | Year of admission |
+| `los_days` | Length of stay in days |
+| `age_at_admission` | Patient age at time of admission, capped at 89 |
+| `daily_admission_count` | Total admissions on that calendar day — the **forecast target** |
+
+#### `gold.patient_vitals_features` — Pipeline 3 (Alerts)
+
+Summarizes all vital sign measurements per admission into statistical aggregations. Each vital sign produces four columns — mean, min, max, and last recorded value.
+
+| Vital Sign | Columns Generated |
+|---|---|
+| Heart Rate | `heart_rate_mean`, `heart_rate_min`, `heart_rate_max`, `heart_rate_last` |
+| Systolic BP | `systolic_bp_mean`, `systolic_bp_min`, `systolic_bp_max`, `systolic_bp_last` |
+| SpO2 | `spo2_mean`, `spo2_min`, `spo2_max`, `spo2_last` |
+| Temperature | `temperature_c_mean`, `temperature_c_min`, `temperature_c_max`, `temperature_c_last` |
+| Respiratory Rate | `respiratory_rate_mean`, `respiratory_rate_min`, `respiratory_rate_max`, `respiratory_rate_last` |
+
+Additional columns per vital sign:
+- `*_normalized` — min-max scaled to 0–1 range using physiological bounds
+- `*_was_missing` — binary flag (1 = vital was never recorded for this admission)
+
+> **Issue encountered and resolved:** After the initial Gold build, temperature columns were entirely null despite 1,042 temperature rows existing correctly in Silver. Investigation confirmed the labeling and Silver data were correct — the problem was a stale in-memory variable from a previous notebook run. The fix was rebuilding the entire Gold vitals table in one clean sequential execution, eliminating stale state.
+
+#### `gold.patient_lab_features` — Pipeline 3 (Alerts)
+
+Summarizes lab test results per admission. Each lab test produces two columns — mean across all measurements and the last recorded value (most clinically relevant for predicting complications).
+
+| Lab Test | Columns Generated | Clinical Significance |
+|---|---|---|
+| Creatinine | `creatinine_mean`, `creatinine_last` | Kidney function |
+| Glucose | `glucose_mean`, `glucose_last` | Blood sugar regulation |
+| Hemoglobin | `hemoglobin_mean`, `hemoglobin_last` | Blood health |
+| Platelets | `platelets_mean`, `platelets_last` | Clotting ability |
+| WBC | `wbc_mean`, `wbc_last` | Infection indicator |
+| Lactate | `lactate_mean`, `lactate_last` | Sepsis indicator |
+
+Additional column:
+- `lactate_was_missing` — binary flag indicating lactate was never measured. Lactate is not a routine test — it is only ordered when sepsis is suspected. Its absence is itself clinically meaningful and the model learns from it.
+
+> **Issue encountered and resolved:** Lactate nulls were initially flagged as a problem. Investigation confirmed this is a documented clinical reality in MIMIC — lactate is only ordered for critically ill patients. The correct handling was **median imputation** combined with a `lactate_was_missing` flag, preserving the clinical signal that the test was not ordered.
+
+---
+
+### Techniques Applied Across All Three Layers
+
+| Technique | Layer | Applied To |
+|---|---|---|
+| Raw ingestion with metadata | Bronze | All 8 tables |
+| Data type casting | Silver | All 5 tables |
+| Pseudonymization (SHA-256 + salt) | Silver | All tables with patient IDs |
+| Age derivation with 89-year cap | Silver | `admissions` |
+| Null handling | Silver | All 5 tables |
+| Data validation (physiological ranges) | Silver | `chartevents`, `labevents` |
+| Statistical outlier detection (IQR × 3) | Silver | `chartevents`, `labevents` |
+| Filtering to relevant measurements | Silver | `chartevents`, `labevents` |
+| Deduplication | Silver | `chartevents`, `labevents`, `admissions` |
+| Referential integrity enforcement | Silver | `chartevents`, `labevents`, `icustays` |
+| Date partitioning | Silver | `chartevents`, `labevents`, `admissions` |
+| Time component extraction | Gold | `admission_features` |
+| Statistical aggregation (mean/min/max/last) | Gold | `vitals_features`, `lab_features` |
+| Pivot to one row per admission | Gold | `vitals_features`, `lab_features` |
+| Min-max normalization | Gold | `vitals_features` |
+| Missing value flags | Gold | `vitals_features`, `lab_features` |
+| Median imputation | Gold | `vitals_features`, `lab_features` |
 
 ---
 
