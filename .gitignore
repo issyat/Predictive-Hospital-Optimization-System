@@ -1,0 +1,12 @@
+# Secrets
+hospital-api/.env
+hospital-dashboard/.env
+
+# Model artifacts (large binary files)
+hospital-api/models/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
